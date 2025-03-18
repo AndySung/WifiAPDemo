@@ -12,6 +12,11 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,10 +43,62 @@ public class MainActivity extends AppCompatActivity {
         setupDevicesList();
     }
 
+    // 在类成员变量中添加
+    private SwipeRefreshLayout swipeRefresh;
+    
+    // 在 initViews() 方法中添加
     private void initViews() {
         switchWifiAP = findViewById(R.id.switchWifiAP);
         tvApInfo = findViewById(R.id.tvApInfo);
         lvConnectedDevices = findViewById(R.id.lvConnectedDevices);
+        swipeRefresh = findViewById(R.id.swipeRefresh);
+        
+        // 设置下拉刷新监听器
+        swipeRefresh.setOnRefreshListener(() -> {
+            refreshConnectedDevices();
+        });
+    }
+    
+    // 添加刷新方法
+    private void refreshConnectedDevices() {
+        if (!switchWifiAP.isChecked()) {
+            swipeRefresh.setRefreshing(false);
+            return;
+        }
+    
+        new Thread(() -> {
+            // 这里实现实际的设备扫描逻辑
+            List<String> connectedIPs = getConnectedDevices();
+            runOnUiThread(() -> {
+                connectedDevices.clear();
+                connectedDevices.addAll(connectedIPs);
+                deviceAdapter.notifyDataSetChanged();
+                swipeRefresh.setRefreshing(false);
+            });
+        }).start();
+    }
+    
+    // 添加获取已连接设备的方法
+    private List<String> getConnectedDevices() {
+        List<String> result = new ArrayList<>();
+        try {
+            // 读取 ARP 缓存表获取连接设备
+            Process process = Runtime.getRuntime().exec("ip neigh");
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.contains("192.168.") && line.contains("REACHABLE")) {
+                    String[] parts = line.split(" ");
+                    if (parts.length > 0) {
+                        result.add(parts[0]); // 添加 IP 地址
+                    }
+                }
+            }
+            reader.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return result;
     }
 
     private void checkPermissions() {
@@ -73,6 +130,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startWifiAP() {
+        if (!wifiManager.isWifiEnabled()) {
+            Toast.makeText(this, "请先开启WiFi", Toast.LENGTH_SHORT).show();
+            switchWifiAP.setChecked(false);
+            return;
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WifiManager.LocalOnlyHotspotCallback callback = new WifiManager.LocalOnlyHotspotCallback() {
                 @Override
@@ -83,23 +146,35 @@ public class MainActivity extends AppCompatActivity {
 
                 @Override
                 public void onFailed(int reason) {
-                    Toast.makeText(MainActivity.this, 
-                            "WiFi AP 启动失败", 
-                            Toast.LENGTH_SHORT).show();
+                    runOnUiThread(() -> {
+                        Toast.makeText(MainActivity.this, 
+                                "WiFi AP 启动失败", 
+                                Toast.LENGTH_SHORT).show();
+                        switchWifiAP.setChecked(false);
+                    });
                 }
             };
-            wifiManager.startLocalOnlyHotspot(callback, null);
+            try {
+                wifiManager.startLocalOnlyHotspot(callback, null);
+            } catch (IllegalStateException e) {
+                Toast.makeText(this, "热点已经在运行中", Toast.LENGTH_SHORT).show();
+                switchWifiAP.setChecked(false);
+            }
         }
     }
 
     private void stopWifiAP() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            wifiManager.startLocalOnlyHotspot(new WifiManager.LocalOnlyHotspotCallback() {
-                @Override
-                public void onStarted(WifiManager.LocalOnlyHotspotReservation reservation) {
-                    reservation.close();
-                }
-            }, null);
+            try {
+                wifiManager.startLocalOnlyHotspot(new WifiManager.LocalOnlyHotspotCallback() {
+                    @Override
+                    public void onStarted(WifiManager.LocalOnlyHotspotReservation reservation) {
+                        reservation.close();
+                    }
+                }, null);
+            } catch (IllegalStateException e) {
+                // 忽略异常，因为这可能意味着热点已经关闭
+            }
         }
         tvApInfo.setText("AP信息：");
         connectedDevices.clear();
@@ -132,13 +207,12 @@ public class MainActivity extends AppCompatActivity {
         );
     }
 
+    // 只保留这一个 startDeviceCheck 方法，删除其他重复的
     private void startDeviceCheck() {
         new Thread(() -> {
             while (switchWifiAP.isChecked()) {
-                // 这里需要实现获取已连接设备的逻辑
-                // 可以通过读取 /proc/net/arp 文件或其他方式
-                // 这里仅作示例
-                updateConnectedDevices(List.of("192.168.43.1", "192.168.43.2"));
+                List<String> devices = getConnectedDevices();
+                updateConnectedDevices(devices);
                 try {
                     Thread.sleep(5000);
                 } catch (InterruptedException e) {
